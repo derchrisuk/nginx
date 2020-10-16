@@ -67,7 +67,7 @@ Homepage: https://github.com/yaoweibin/ngx_http_substitutions_filter_module
 Version: 0.6.4
 Patch: dynamic-module.patch
 
-Module: rtmp
+Module: http-flv-live
 Homepage: https://github.com/arut/nginx-rtmp-module
 Files-Excluded: test
 Version: 1.2.1
