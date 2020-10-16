@@ -1,12 +1,14 @@
 
 /*
  * Copyright (C) Roman Arutyunyan
+ * Copyright (C) Winshining
  */
 
 
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_md5.h>
+#include <ngx_http.h>
 #include "ngx_rtmp.h"
 #include "ngx_rtmp_cmd_module.h"
 #include "ngx_rtmp_netcall_module.h"
@@ -48,6 +50,13 @@ ngx_str_t   ngx_rtmp_notify_urlencoded =
 
 
 enum {
+    NGX_RTMP_NOTIFY_CONNECT,
+    NGX_RTMP_NOTIFY_DISCONNECT,
+    NGX_RTMP_NOTIFY_SRV_MAX
+};
+
+
+enum {
     NGX_RTMP_NOTIFY_PLAY,
     NGX_RTMP_NOTIFY_PUBLISH,
     NGX_RTMP_NOTIFY_PLAY_DONE,
@@ -59,13 +68,6 @@ enum {
 };
 
 
-enum {
-    NGX_RTMP_NOTIFY_CONNECT,
-    NGX_RTMP_NOTIFY_DISCONNECT,
-    NGX_RTMP_NOTIFY_SRV_MAX
-};
-
-
 typedef struct {
     ngx_url_t                                  *url[NGX_RTMP_NOTIFY_APP_MAX];
     ngx_flag_t                                  active;
@@ -73,6 +75,7 @@ typedef struct {
     ngx_msec_t                                  update_timeout;
     ngx_flag_t                                  update_strict;
     ngx_flag_t                                  relay_redirect;
+    ngx_flag_t                                  no_resolve;
 } ngx_rtmp_notify_app_conf_t;
 
 
@@ -191,6 +194,13 @@ static ngx_command_t  ngx_rtmp_notify_commands[] = {
       offsetof(ngx_rtmp_notify_app_conf_t, relay_redirect),
       NULL },
 
+    { ngx_string("notify_no_resolve"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_flag_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_notify_app_conf_t, no_resolve),
+      NULL },
+
       ngx_null_command
 };
 
@@ -242,6 +252,7 @@ ngx_rtmp_notify_create_app_conf(ngx_conf_t *cf)
     nacf->update_timeout = NGX_CONF_UNSET_MSEC;
     nacf->update_strict = NGX_CONF_UNSET;
     nacf->relay_redirect = NGX_CONF_UNSET;
+    nacf->no_resolve = NGX_CONF_UNSET;
 
     return nacf;
 }
@@ -271,6 +282,7 @@ ngx_rtmp_notify_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
                               30000);
     ngx_conf_merge_value(conf->update_strict, prev->update_strict, 0);
     ngx_conf_merge_value(conf->relay_redirect, prev->relay_redirect, 0);
+    ngx_conf_merge_value(conf->no_resolve, prev->no_resolve, 1);
 
     return NGX_CONF_OK;
 }
@@ -892,6 +904,7 @@ ngx_rtmp_notify_parse_http_header(ngx_rtmp_session_t *s,
 
                     n = 0;
                     state = parse_name;
+
                     /* fall through */
 
                 case parse_name:
@@ -920,6 +933,7 @@ ngx_rtmp_notify_parse_http_header(ngx_rtmp_session_t *s,
                         break;
                     }
                     state = parse_value;
+
                     /* fall through */
 
                 case parse_value:
@@ -958,11 +972,13 @@ static ngx_int_t
 ngx_rtmp_notify_connect_handle(ngx_rtmp_session_t *s,
         void *arg, ngx_chain_t *in)
 {
-    ngx_rtmp_connect_t *v = arg;
-    ngx_int_t           rc;
-    u_char              app[NGX_RTMP_MAX_NAME];
+    ngx_rtmp_connect_t     *v = arg;
+    ngx_http_request_t     *r;
+    ngx_int_t               rc;
+    u_char                  app[NGX_RTMP_MAX_NAME];
 
-    static ngx_str_t    location = ngx_string("location");
+    static ngx_rtmp_play_t  p;
+    static ngx_str_t        location = ngx_string("location");
 
     rc = ngx_rtmp_notify_parse_http_retcode(s, in);
     if (rc == NGX_ERROR) {
@@ -982,7 +998,23 @@ ngx_rtmp_notify_connect_handle(ngx_rtmp_session_t *s,
         }
     }
 
-    return next_connect(s, v);
+    rc = next_connect(s, v);
+    if (rc == NGX_OK && s->notify_connect) {
+        r = s->data;
+        if (r) {
+            ngx_memzero(&p, sizeof(ngx_rtmp_play_t));
+            ngx_memcpy(p.name, s->stream.data,
+                       ngx_min(s->stream.len, NGX_RTMP_MAX_NAME - 1));
+            ngx_memcpy(p.args, s->args.data,
+                       ngx_min(s->args.len, NGX_RTMP_MAX_ARGS - 1));
+
+            rc = ngx_rtmp_play(s, &p);
+        }
+    }
+
+    s->notify_connect = 0;
+
+    return rc;
 }
 
 
@@ -1051,7 +1083,7 @@ ngx_rtmp_notify_publish_handle(ngx_rtmp_session_t *s,
         ngx_rtmp_notify_set_name(v->name, NGX_RTMP_MAX_NAME, name, (size_t) rc);
     }
 
-    ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+    ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
                   "notify: push '%s' to '%*s'", v->name, rc, name);
 
     local_name.data = v->name;
@@ -1065,10 +1097,10 @@ ngx_rtmp_notify_publish_handle(ngx_rtmp_session_t *s,
     u->url.len = rc - 7;
     u->default_port = 1935;
     u->uri_part = 1;
-    u->no_resolve = 1; /* want ip here */
+    u->no_resolve = nacf->no_resolve; /* want ip here */
 
     if (ngx_parse_url(s->connection->pool, u) != NGX_OK) {
-        ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
                       "notify: push failed '%V'", &local_name);
         return NGX_ERROR;
     }
@@ -1094,6 +1126,10 @@ ngx_rtmp_notify_play_handle(ngx_rtmp_session_t *s,
     u_char                      name[NGX_RTMP_MAX_NAME];
 
     static ngx_str_t            location = ngx_string("location");
+
+    if (s->notify_play) {
+        s->notify_play = 0;
+    }
 
     rc = ngx_rtmp_notify_parse_http_retcode(s, in);
     if (rc == NGX_ERROR) {
@@ -1144,7 +1180,7 @@ ngx_rtmp_notify_play_handle(ngx_rtmp_session_t *s,
     u->url.len = rc - 7;
     u->default_port = 1935;
     u->uri_part = 1;
-    u->no_resolve = 1; /* want ip here */
+    u->no_resolve = nacf->no_resolve; /* want ip here */
 
     if (ngx_parse_url(s->connection->pool, u) != NGX_OK) {
         ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
@@ -1196,14 +1232,12 @@ ngx_rtmp_notify_update_handle(ngx_rtmp_session_t *s,
 static void
 ngx_rtmp_notify_update(ngx_event_t *e)
 {
-    ngx_connection_t           *c;
     ngx_rtmp_session_t         *s;
     ngx_rtmp_notify_app_conf_t *nacf;
     ngx_rtmp_netcall_init_t     ci;
     ngx_url_t                  *url;
 
-    c = e->data;
-    s = c->data;
+    s = e->data;
 
     nacf = ngx_rtmp_get_module_app_conf(s, ngx_rtmp_notify_module);
 
@@ -1272,7 +1306,7 @@ ngx_rtmp_notify_init(ngx_rtmp_session_t *s,
 
     e = &ctx->update_evt;
 
-    e->data = s->connection;
+    e->data = s;
     e->log = s->connection->log;
     e->handler = ngx_rtmp_notify_update;
 
@@ -1312,6 +1346,8 @@ ngx_rtmp_notify_connect(ngx_rtmp_session_t *s, ngx_rtmp_connect_t *v)
     ci.handle = ngx_rtmp_notify_connect_handle;
     ci.arg = v;
     ci.argsize = sizeof(*v);
+
+    s->notify_connect = 1;
 
     return ngx_rtmp_netcall_create(s, &ci);
 
@@ -1402,7 +1438,7 @@ ngx_rtmp_notify_play(ngx_rtmp_session_t *s, ngx_rtmp_play_t *v)
     ngx_rtmp_netcall_init_t         ci;
     ngx_url_t                      *url;
 
-    if (s->auto_pushed) {
+    if (s->auto_pushed || v->silent) {
         goto next;
     }
 
@@ -1429,6 +1465,8 @@ ngx_rtmp_notify_play(ngx_rtmp_session_t *s, ngx_rtmp_play_t *v)
     ci.handle = ngx_rtmp_notify_play_handle;
     ci.arg = v;
     ci.argsize = sizeof(*v);
+
+    s->notify_play = 1;
 
     return ngx_rtmp_netcall_create(s, &ci);
 

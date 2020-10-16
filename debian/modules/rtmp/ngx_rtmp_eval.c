@@ -154,6 +154,7 @@ ngx_rtmp_eval(void *ctx, ngx_str_t *in, ngx_rtmp_eval_t **e, ngx_str_t *out,
 
                 name.len = p - name.data;
                 ngx_rtmp_eval_append_var(ctx, &b, e, &name, log);
+
                 /* fall through */
 
             case NORMAL:
@@ -165,7 +166,11 @@ ngx_rtmp_eval(void *ctx, ngx_str_t *in, ngx_rtmp_eval_t **e, ngx_str_t *out,
                     case '\\':
                         state = ESCAPE;
                         continue;
+                    default:
+                        break;
                 }
+
+                /* fall through */
 
             case ESCAPE:
                 ngx_rtmp_eval_append(&b, &c, 1, log);
