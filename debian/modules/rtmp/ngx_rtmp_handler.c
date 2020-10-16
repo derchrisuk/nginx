@@ -1,19 +1,19 @@
 
 /*
  * Copyright (C) Roman Arutyunyan
+ * Copyright (C) Winshining
  */
 
 
 #include <ngx_config.h>
 #include <ngx_core.h>
-#include "ngx_rtmp.h"
+#include "ngx_rtmp_live_module.h"
 #include "ngx_rtmp_amf.h"
 
 
 static void ngx_rtmp_recv(ngx_event_t *rev);
 static void ngx_rtmp_send(ngx_event_t *rev);
 static void ngx_rtmp_ping(ngx_event_t *rev);
-static ngx_int_t ngx_rtmp_finalize_set_chunk_size(ngx_rtmp_session_t *s);
 
 
 ngx_uint_t                  ngx_rtmp_naccepted;
@@ -86,6 +86,7 @@ ngx_rtmp_cycle(ngx_rtmp_session_t *s)
     ngx_connection_t           *c;
 
     c = s->connection;
+
     c->read->handler =  ngx_rtmp_recv;
     c->write->handler = ngx_rtmp_send;
 
@@ -98,7 +99,7 @@ ngx_rtmp_cycle(ngx_rtmp_session_t *s)
 }
 
 
-static ngx_chain_t *
+ngx_chain_t *
 ngx_rtmp_alloc_in_buf(ngx_rtmp_session_t *s)
 {
     ngx_chain_t        *cl;
@@ -430,7 +431,8 @@ ngx_rtmp_recv(ngx_event_t *rev)
 
             if (h->mlen > cscf->max_message) {
                 ngx_log_error(NGX_LOG_INFO, c->log, 0,
-                        "too big message: %uz", cscf->max_message);
+                        "too big message: %uz, %uz",
+                                h->mlen, cscf->max_message);
                 ngx_rtmp_finalize_session(s);
                 return;
             }
@@ -466,6 +468,14 @@ ngx_rtmp_recv(ngx_event_t *rev)
                 return;
             }
 
+            /* server configuration may change due to virtual server match */
+            if (s->server_changed) {
+                cscf = ngx_rtmp_get_module_srv_conf(s, ngx_rtmp_core_module);
+                st = &s->in_streams[s->in_csid];
+
+                s->server_changed = 0;
+            }
+
             if (s->in_chunk_size_changing) {
                 /* copy old data to a new buffer */
                 if (!old_size) {
@@ -492,6 +502,7 @@ ngx_rtmp_send(ngx_event_t *wev)
     ngx_connection_t           *c;
     ngx_rtmp_session_t         *s;
     ngx_int_t                   n;
+    ngx_rtmp_live_ctx_t        *lctx;
     ngx_rtmp_core_srv_conf_t   *cscf;
 
     c = wev->data;
@@ -554,6 +565,11 @@ ngx_rtmp_send(ngx_event_t *wev)
         }
     }
 
+    lctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_live_module);
+    if (lctx && !lctx->publishing && !wev->timer_set) {
+        ngx_add_timer(wev, s->timeout);
+    }
+
     if (wev->active) {
         ngx_del_event(wev, NGX_WRITE_EVENT, 0);
     }
@@ -604,9 +620,27 @@ ngx_rtmp_prepare_message(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                 ++fmt;
             }
         }
-        timestamp = h->timestamp - lh->timestamp;
+
+        if (h->type == NGX_RTMP_MSG_VIDEO || h->type == NGX_RTMP_MSG_AUDIO) {
+            timestamp = h->timestamp - s->offset_timestamp - lh->timestamp;
+
+            if (lh->timestamp) {
+                timestamp += s->offset_timestamp;
+            }
+        } else {
+            timestamp = h->timestamp - lh->timestamp;
+        }
     } else {
-        timestamp = h->timestamp;
+        if (h->type == NGX_RTMP_MSG_VIDEO || h->type == NGX_RTMP_MSG_AUDIO) {
+            if (!s->offset_timestamp_set) {
+                s->offset_timestamp_set = 1;
+                s->offset_timestamp = h->timestamp;
+            } else if (h->timestamp == 0) {
+                s->offset_timestamp = 0;
+            }
+        }
+
+        timestamp = h->timestamp - s->offset_timestamp;
     }
 
     /*if (lh) {
@@ -712,7 +746,7 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
 {
     ngx_uint_t                      nmsg;
 
-    nmsg = (s->out_last - s->out_pos) % s->out_queue + 1;
+    nmsg = (s->out_last + s->out_queue - s->out_pos) % s->out_queue + 1;
 
     if (priority > 3) {
         priority = 3;
@@ -724,6 +758,7 @@ ngx_rtmp_send_message(ngx_rtmp_session_t *s, ngx_chain_t *out,
         ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
                 "RTMP drop message bufs=%ui, priority=%ui",
                 nmsg, priority);
+
         return NGX_AGAIN;
     }
 
@@ -887,7 +922,7 @@ ngx_rtmp_set_chunk_size(ngx_rtmp_session_t *s, ngx_uint_t size)
 }
 
 
-static ngx_int_t
+ngx_int_t
 ngx_rtmp_finalize_set_chunk_size(ngx_rtmp_session_t *s)
 {
     if (s->in_chunk_size_changing && s->in_old_pool) {

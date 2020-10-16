@@ -1,6 +1,7 @@
 
 /*
  * Copyright (C) Roman Arutyunyan
+ * Copyright (C) Winshining
  */
 
 
@@ -26,9 +27,9 @@ static ngx_int_t ngx_rtmp_codec_copy_meta(ngx_rtmp_session_t *s,
        ngx_rtmp_header_t *h, ngx_chain_t *in);
 static ngx_int_t ngx_rtmp_codec_prepare_meta(ngx_rtmp_session_t *s,
        uint32_t timestamp);
-static void ngx_rtmp_codec_parse_aac_header(ngx_rtmp_session_t *s,
+static ngx_int_t ngx_rtmp_codec_parse_aac_header(ngx_rtmp_session_t *s,
        ngx_chain_t *in);
-static void ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s,
+static ngx_int_t ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s,
        ngx_chain_t *in);
 #if (NGX_DEBUG)
 static void ngx_rtmp_codec_dump_header(ngx_rtmp_session_t *s, const char *type,
@@ -216,6 +217,8 @@ ngx_rtmp_codec_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         return NGX_OK;
     }
 
+    cscf = ngx_rtmp_get_module_srv_conf(s, ngx_rtmp_core_module);
+
     fmt =  in->buf->pos[0];
     if (h->type == NGX_RTMP_MSG_AUDIO) {
         ctx->audio_codec_id = (fmt & 0xf0) >> 4;
@@ -225,6 +228,7 @@ ngx_rtmp_codec_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         if (ctx->sample_rate == 0) {
             ctx->sample_rate = sample_rates[(fmt & 0x0c) >> 2];
         }
+
     } else {
         ctx->video_codec_id = (fmt & 0x0f);
     }
@@ -234,23 +238,28 @@ ngx_rtmp_codec_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         return NGX_OK;
     }
 
-    /* no conf */
+    /* PacketType = 0, FLV TAG MUST be sequence header */
+    /* PacketType = 1, FLV TAG MAY be AVC NALU or AAC Raw */
     if (!ngx_rtmp_is_codec_header(in)) {
         return NGX_OK;
     }
 
-    cscf = ngx_rtmp_get_module_srv_conf(s, ngx_rtmp_core_module);
     header = NULL;
 
+    /* MUST be audio / video sequence header */
     if (h->type == NGX_RTMP_MSG_AUDIO) {
         if (ctx->audio_codec_id == NGX_RTMP_AUDIO_AAC) {
             header = &ctx->aac_header;
-            ngx_rtmp_codec_parse_aac_header(s, in);
+            if (ngx_rtmp_codec_parse_aac_header(s, in) == NGX_ERROR) {
+                return NGX_ERROR;
+            }
         }
     } else {
         if (ctx->video_codec_id == NGX_RTMP_VIDEO_H264) {
             header = &ctx->avc_header;
-            ngx_rtmp_codec_parse_avc_header(s, in);
+            if (ngx_rtmp_codec_parse_avc_header(s, in) == NGX_ERROR) {
+                return NGX_ERROR;
+            }
         }
     }
 
@@ -268,7 +277,7 @@ ngx_rtmp_codec_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 }
 
 
-static void
+static ngx_int_t
 ngx_rtmp_codec_parse_aac_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 {
     ngx_uint_t              idx;
@@ -286,6 +295,14 @@ ngx_rtmp_codec_parse_aac_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 #endif
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_codec_module);
+
+    if (in->buf->last - in->buf->pos < 4) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                      "codec: invalid audio codec header size=%ui",
+                      in->buf->last - in->buf->pos);
+
+        return NGX_ERROR;
+    }
 
     ngx_rtmp_bit_init_reader(&br, in->buf->pos, in->buf->last);
 
@@ -351,12 +368,15 @@ ngx_rtmp_codec_parse_aac_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
                    "codec: aac header profile=%ui, "
                    "sample_rate=%ui, chan_conf=%ui",
                    ctx->aac_profile, ctx->sample_rate, ctx->aac_chan_conf);
+
+    return NGX_OK;
 }
 
 
-static void
+static ngx_int_t
 ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 {
+    ngx_uint_t              avc_config_version;
     ngx_uint_t              profile_idc, width, height, crop_left, crop_right,
                             crop_top, crop_bottom, frame_mbs_only, n, cf_idc,
                             num_ref_frames;
@@ -369,9 +389,25 @@ ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 
     ctx = ngx_rtmp_get_module_ctx(s, ngx_rtmp_codec_module);
 
+    if (in->buf->last - in->buf->pos < 18) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                      "codec: invalid video codec header size=%ui",
+                      in->buf->last - in->buf->pos);
+
+        return NGX_ERROR;
+    }
+
     ngx_rtmp_bit_init_reader(&br, in->buf->pos, in->buf->last);
 
-    ngx_rtmp_bit_read(&br, 48);
+    ngx_rtmp_bit_read(&br, 40);
+
+    avc_config_version = (ngx_uint_t) ngx_rtmp_bit_read_8(&br);
+    if (avc_config_version == 0) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                      "codec: zero configurationVersion");
+
+        return NGX_ERROR;
+    }
 
     ctx->avc_profile = (ngx_uint_t) ngx_rtmp_bit_read_8(&br);
     ctx->avc_compat = (ngx_uint_t) ngx_rtmp_bit_read_8(&br);
@@ -379,10 +415,17 @@ ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 
     /* nal bytes */
     ctx->avc_nal_bytes = (ngx_uint_t) ((ngx_rtmp_bit_read_8(&br) & 0x03) + 1);
+    if (ctx->avc_nal_bytes != 3 && ctx->avc_nal_bytes != 4) {
+        ngx_log_error(NGX_LOG_ERR, s->connection->log, 0,
+                      "codec: invalid lengthSizeMinusOne value=%ui",
+                      ctx->avc_nal_bytes - 1);
+
+        return NGX_ERROR;
+    }
 
     /* nnals */
     if ((ngx_rtmp_bit_read_8(&br) & 0x1f) == 0) {
-        return;
+        return NGX_ERROR;
     }
 
     /* nal size */
@@ -390,7 +433,7 @@ ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
 
     /* nal type */
     if (ngx_rtmp_bit_read_8(&br) != 0x67) {
-        return;
+        return NGX_OK;
     }
 
     /* SPS */
@@ -530,6 +573,8 @@ ngx_rtmp_codec_parse_avc_header(ngx_rtmp_session_t *s, ngx_chain_t *in)
                    ctx->avc_profile, ctx->avc_compat, ctx->avc_level,
                    ctx->avc_nal_bytes, ctx->avc_ref_frames,
                    ctx->width, ctx->height);
+
+    return NGX_OK;
 }
 
 
@@ -542,7 +587,7 @@ ngx_rtmp_codec_dump_header(ngx_rtmp_session_t *s, const char *type,
     u_char hex[] = "0123456789abcdef";
 
     for (pp = buf, p = in->buf->pos;
-         p < in->buf->last && pp < buf + sizeof(buf) - 1;
+         p < in->buf->last && pp < buf + sizeof(buf) - 2;
          ++p)
     {
         *pp++ = hex[*p >> 4];
@@ -581,7 +626,7 @@ ngx_rtmp_codec_reconstruct_meta(ngx_rtmp_session_t *s)
 
         { NGX_RTMP_AMF_STRING,
           ngx_string("Server"),
-          "NGINX RTMP (github.com/arut/nginx-rtmp-module)", 0 },
+          "NGINX HTTP-FLV (https://github.com/winshining/nginx-http-flv-module)", 0 },
 
         { NGX_RTMP_AMF_NUMBER,
           ngx_string("width"),
@@ -730,9 +775,11 @@ static ngx_int_t
 ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         ngx_chain_t *in)
 {
+    uint16_t                        len;
+    ngx_uint_t                      skip;
+    u_char                         *p;
     ngx_rtmp_codec_app_conf_t      *cacf;
     ngx_rtmp_codec_ctx_t           *ctx;
-    ngx_uint_t                      skip;
 
     static struct {
         double                      width;
@@ -843,7 +890,23 @@ ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
      * 0 is a valid value for uncompressed audio */
     v.audio_codec_id_n = -1;
 
-    /* FFmpeg sends a string in front of actal metadata; ignore it */
+    if (in->buf->last > in->buf->pos
+        && in->buf->pos - in->buf->start >= 13
+        && in->buf->pos[-13] == NGX_RTMP_AMF_STRING)
+    {
+        p = (u_char *) &len;
+
+        *p++ = in->buf->pos[-11];
+        *p++ = in->buf->pos[-12];
+
+        if (ngx_strncasecmp(in->buf->pos - 10,
+                            (u_char *) "onMetaData", len) == 0)
+        {
+            in->buf->pos -= 13;
+        }
+    }
+
+    /* FFmpeg sends a string in front of actual metadata; ignore it */
     skip = !(in->buf->last > in->buf->pos
             && *in->buf->pos == NGX_RTMP_AMF_STRING);
     if (ngx_rtmp_receive_amf(s, in, in_elts + skip,
@@ -856,11 +919,11 @@ ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ctx->width = (ngx_uint_t) v.width;
     ctx->height = (ngx_uint_t) v.height;
-    ctx->duration = (ngx_uint_t) v.duration;
-    ctx->frame_rate = (ngx_uint_t) v.frame_rate;
-    ctx->video_data_rate = (ngx_uint_t) v.video_data_rate;
+    ctx->duration = v.duration;
+    ctx->frame_rate = v.frame_rate;
+    ctx->video_data_rate = v.video_data_rate;
     ctx->video_codec_id = (ngx_uint_t) v.video_codec_id_n;
-    ctx->audio_data_rate = (ngx_uint_t) v.audio_data_rate;
+    ctx->audio_data_rate = v.audio_data_rate;
     ctx->audio_codec_id = (v.audio_codec_id_n == -1
             ? 0 : v.audio_codec_id_n == 0
             ? NGX_RTMP_AUDIO_UNCOMPRESSED : (ngx_uint_t) v.audio_codec_id_n);
@@ -869,7 +932,7 @@ ngx_rtmp_codec_meta_data(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     ngx_log_debug8(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
             "codec: data frame: "
-            "width=%ui height=%ui duration=%ui frame_rate=%ui "
+            "width=%ui height=%ui duration=%.3f frame_rate=%.3f "
             "video=%s (%ui) audio=%s (%ui)",
             ctx->width, ctx->height, ctx->duration, ctx->frame_rate,
             ngx_rtmp_get_video_codec_name(ctx->video_codec_id),

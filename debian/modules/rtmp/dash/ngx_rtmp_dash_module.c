@@ -22,7 +22,8 @@ static ngx_int_t ngx_rtmp_dash_write_init_segments(ngx_rtmp_session_t *s);
 
 
 #define NGX_RTMP_DASH_BUFSIZE           (1024*1024)
-#define NGX_RTMP_DASH_MAX_MDAT          (10*1024*1024)
+#define NGX_RTMP_DASH_MAX_VIDEO_MDAT    (10*1024*1024)
+#define NGX_RTMP_DASH_MAX_AUDIO_MDAT    (1024*1024)
 #define NGX_RTMP_DASH_MAX_SAMPLES       1024
 #define NGX_RTMP_DASH_DIR_ACCESS        0744
 
@@ -252,6 +253,7 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
         return NGX_ERROR;
     }
 
+
 #define NGX_RTMP_DASH_MANIFEST_HEADER                                          \
     "<?xml version=\"1.0\"?>\n"                                                \
     "<MPD\n"                                                                   \
@@ -275,14 +277,14 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
     "        segmentAlignment=\"true\"\n"                                      \
     "        maxWidth=\"%ui\"\n"                                               \
     "        maxHeight=\"%ui\"\n"                                              \
-    "        maxFrameRate=\"%ui\">\n"                                          \
+    "        maxFrameRate=\"%.3f\">\n"                                         \
     "      <Representation\n"                                                  \
     "          id=\"%V_H264\"\n"                                               \
     "          mimeType=\"video/mp4\"\n"                                       \
     "          codecs=\"avc1.%02uxi%02uxi%02uxi\"\n"                           \
     "          width=\"%ui\"\n"                                                \
     "          height=\"%ui\"\n"                                               \
-    "          frameRate=\"%ui\"\n"                                            \
+    "          frameRate=\"%.3f\"\n"                                           \
     "          startWithSAP=\"1\"\n"                                           \
     "          bandwidth=\"%ui\">\n"                                           \
     "        <SegmentTemplate\n"                                               \
@@ -356,13 +358,8 @@ ngx_rtmp_dash_write_playlist(ngx_rtmp_session_t *s)
                      start_time,
                      pub_time,
                      (ngx_uint_t) (dacf->fraglen / 1000),
-                     (ngx_uint_t) (dacf->fraglen / 1000),
-                     (ngx_uint_t) (dacf->fraglen / 250 + 1));
-
-    /*
-     * timeShiftBufferDepth formula:
-     *     2 * minBufferTime + max_fragment_length + 1
-     */
+                     (ngx_uint_t) (dacf->fraglen / 500),
+                     (ngx_uint_t) (dacf->playlen / 1000));
 
     n = ngx_write_fd(fd, buffer, p - buffer);
 
@@ -601,12 +598,12 @@ ngx_rtmp_dash_close_fragment(ngx_rtmp_session_t *s, ngx_rtmp_dash_track_t *t)
     while (left > 0) {
 
         n = ngx_read_fd(t->fd, buffer, ngx_min(sizeof(buffer), left));
-        if (n == NGX_ERROR) {
+        if (n == 0 || n == NGX_ERROR) {
             break;
         }
 
         n = ngx_write_fd(fd, buffer, (size_t) n);
-        if (n == NGX_ERROR) {
+        if (n == 0 || n == NGX_ERROR) {
             break;
         }
 
@@ -998,11 +995,6 @@ ngx_rtmp_dash_update_fragments(ngx_rtmp_session_t *s, ngx_int_t boundary,
         f->duration = timestamp - f->timestamp;
         hit = (f->duration >= dacf->fraglen);
 
-        /* keep fragment lengths within 2x factor for dash.js  */
-        if (f->duration >= dacf->fraglen * 2) {
-            boundary = 1;
-        }
-
     } else {
 
         /* sometimes clients generate slightly unordered frames */
@@ -1018,11 +1010,16 @@ ngx_rtmp_dash_update_fragments(ngx_rtmp_session_t *s, ngx_int_t boundary,
         boundary = hit;
     }
 
-    if (ctx->audio.mdat_size >= NGX_RTMP_DASH_MAX_MDAT) {
+    /* generally, the size of a audio fragment is mush smaller than
+     * the size of a video fragment, so it will take a long time to
+     * produce a audio fragment if a stream contains only audio.
+     */
+
+    if (ctx->audio.mdat_size >= NGX_RTMP_DASH_MAX_AUDIO_MDAT) {
         boundary = 1;
     }
 
-    if (ctx->video.mdat_size >= NGX_RTMP_DASH_MAX_MDAT) {
+    if (ctx->video.mdat_size >= NGX_RTMP_DASH_MAX_VIDEO_MDAT) {
         boundary = 1;
     }
 
