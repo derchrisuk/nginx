@@ -478,12 +478,12 @@ Description: WebDAV missing commands support for Nginx
  .
  WebDAV Ext provides the missing PROPFIND & OPTIONS methods.
 
-Package: libnginx-mod-rtmp
+Package: libnginx-mod-http-flv-live
 Architecture: any
 Depends: ${misc:Depends}, ${shlibs:Depends},
 Recommends: nginx,
-Description: RTMP support for Nginx
- The nginx RTMP module is a fully-featured streaming solution implemented in
+Description: HTTP FLV support for Nginx
+ The nginx HTTP FLV module is a fully-featured streaming solution implemented in
  nginx.
  .
  It provides the following features:

@@ -25,7 +25,7 @@ DYN_MODS := \
 	http-xslt-filter \
 	mail \
 	nchan \
-	rtmp \
+	http-flv-live \
 	stream \
 	stream-geoip \
 	stream-geoip2
@@ -124,7 +124,7 @@ extras_configure_flags := \
 			--add-dynamic-module=$(MODULESDIR)/http-geoip2 \
 			--add-dynamic-module=$(MODULESDIR)/nchan \
 			--add-dynamic-module=$(MODULESDIR)/http-lua \
-			--add-dynamic-module=$(MODULESDIR)/rtmp \
+			--add-dynamic-module=$(MODULESDIR)/http-flv-live \
 			--add-dynamic-module=$(MODULESDIR)/http-uploadprogress \
 			--add-dynamic-module=$(MODULESDIR)/http-upstream-fair \
 			--add-dynamic-module=$(MODULESDIR)/http-subs-filter
