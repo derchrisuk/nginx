@@ -1,5 +1,11 @@
 nginx (1.18.0-5) unstable; urgency=medium
 
+  * Added Kaltura VOD
+
+ -- derchris <derchris@me.com>  Sun, 05 Dec 2021 16:29:00 +0200
+
+nginx (1.18.0-5) unstable; urgency=medium
+
   * Prevented request smuggling in LUA
     CVE-2020-11724
     Closes: #964950

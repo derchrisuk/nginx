@@ -72,3 +72,7 @@ Homepage: https://github.com/arut/nginx-rtmp-module
 Files-Excluded: test
 Version: 1.2.1
 
+Module: http-vod
+Homepage: https://github.com/kaltura/nginx-vod-module
+Files-Excluded: test .github
+Version: 1.29

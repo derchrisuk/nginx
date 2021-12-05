@@ -492,3 +492,10 @@ Description: RTMP support for Nginx
   - Stream relay support via a push or pull model;
   - Integrated stream recording;
   - and more.
+
+Package: libnginx-mod-http-vod
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends},
+Recommends: nginx,
+Description: VOD support for Nginx
+ On-the-fly repackaging of MP4 files to DASH, HDS, HLS, MSS
