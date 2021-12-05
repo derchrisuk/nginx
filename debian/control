@@ -21,7 +21,10 @@ Build-Depends: debhelper-compat (= 13),
                libxslt1-dev,
                po-debconf,
                quilt,
-               zlib1g-dev
+               zlib1g-dev,
+               libavcodec-dev,
+               libswscale-dev,
+               libavfilter-dev
 Standards-Version: 4.5.0
 Homepage: https://nginx.net
 Vcs-Git: https://salsa.debian.org/nginx-team/nginx.git
