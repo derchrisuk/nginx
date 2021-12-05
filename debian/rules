@@ -28,7 +28,8 @@ DYN_MODS := \
 	rtmp \
 	stream \
 	stream-geoip \
-	stream-geoip2
+	stream-geoip2 \
+	http-vod
 
 MODULESDIR = $(CURDIR)/debian/modules
 BASEDIR = $(CURDIR)
@@ -73,7 +74,8 @@ common_configure_flags := \
 			--with-http_v2_module \
 			--with-http_dav_module \
 			--with-http_slice_module \
-			--with-threads
+			--with-threads \
+			--with-file-aio
 
 light_configure_flags := \
 			$(common_configure_flags) \
@@ -127,7 +129,8 @@ extras_configure_flags := \
 			--add-dynamic-module=$(MODULESDIR)/rtmp \
 			--add-dynamic-module=$(MODULESDIR)/http-uploadprogress \
 			--add-dynamic-module=$(MODULESDIR)/http-upstream-fair \
-			--add-dynamic-module=$(MODULESDIR)/http-subs-filter
+			--add-dynamic-module=$(MODULESDIR)/http-subs-filter \
+			--add-dynamic-module=$(MODULESDIR)/http-vod
 
 %:
 	dh $@ --without autoreconf
